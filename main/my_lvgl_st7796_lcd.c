@@ -20,6 +20,8 @@
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_touch.h"
+#include "esp_lcd_touch_xpt2046.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
@@ -30,7 +32,7 @@
 
 static const char *TAG = "LVGL_DEMO";
 
-// Pin definitions
+// LCD Pin definitions
 #define LCD_HOST            SPI2_HOST
 #define LCD_PIXEL_CLOCK_HZ  (40 * 1000 * 1000)
 #define LCD_BK_LIGHT_ON     1
@@ -42,6 +44,12 @@ static const char *TAG = "LVGL_DEMO";
 #define PIN_NUM_DC          2
 #define PIN_NUM_RST         -1
 #define PIN_NUM_BL          27
+
+// Touch Pin definitions (XPT2046 shares SPI with LCD)
+#define TOUCH_HOST          SPI2_HOST  // Same SPI bus as LCD
+#define TOUCH_CS            33         // Touch chip select
+#define TOUCH_IRQ           36         // Touch interrupt (optional)
+#define TOUCH_CLOCK_HZ      (2 * 1000 * 1000)  // 2.5MHz max for XPT2046
 
 // LCD resolution
 #define LCD_H_RES           480
@@ -57,6 +65,7 @@ static const char *TAG = "LVGL_DEMO";
 #define LVGL_TICK_PERIOD_MS 2
 
 static lv_display_t *lvgl_disp = NULL;
+static lv_indev_t *lvgl_touch_indev = NULL;
 
 // LVGL tick callback
 static void increase_lvgl_tick(void *arg)
@@ -78,6 +87,34 @@ static void lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px
     lv_display_flush_ready(disp);
 }
 
+// LVGL touch read callback
+static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    esp_lcd_touch_handle_t touch_handle = (esp_lcd_touch_handle_t)lv_indev_get_user_data(indev);
+    uint16_t touchpad_x;
+    uint16_t touchpad_y;
+    uint16_t touch_strength;
+    uint8_t touch_cnt = 0;
+
+    // Set default state to released
+    data->state = LV_INDEV_STATE_RELEASED;
+
+    // Read touch data
+    esp_lcd_touch_read_data(touch_handle);
+    
+    // Get coordinates
+    bool touchpad_pressed = esp_lcd_touch_get_coordinates(touch_handle, &touchpad_x, &touchpad_y, 
+                                                          &touch_strength, &touch_cnt, 1);
+    
+    if (touchpad_pressed && touch_cnt > 0) {
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = touchpad_x;
+        data->point.y = touchpad_y;
+        
+        ESP_LOGI(TAG, "Touch: x=%d, y=%d, strength=%d", touchpad_x, touchpad_y, touch_strength);
+    }
+}
+
 // Configure and initialize backlight GPIO
 static void init_backlight_gpio(void)
 {
@@ -90,14 +127,14 @@ static void init_backlight_gpio(void)
     gpio_set_level(PIN_NUM_BL, LCD_BK_LIGHT_OFF);
 }
 
-// Initialize SPI bus for LCD communication
+// Initialize SPI bus for LCD and touch communication
 static void init_spi_bus(void)
 {
     ESP_LOGI(TAG, "Initialize SPI bus");
     spi_bus_config_t buscfg = {
         .sclk_io_num = PIN_NUM_CLK,
         .mosi_io_num = PIN_NUM_MOSI,
-        .miso_io_num = -1,
+        .miso_io_num = 12,  // MISO needed for touch controller
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
         .max_transfer_sz = LCD_H_RES * LCD_V_RES * sizeof(uint16_t),
@@ -149,6 +186,53 @@ static void configure_lcd_panel(esp_lcd_panel_handle_t panel_handle)
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
 }
 
+// Initialize XPT2046 touch controller
+static esp_lcd_touch_handle_t init_touch_controller(void)
+{
+    ESP_LOGI(TAG, "Initialize XPT2046 resistive touch controller");
+    
+    esp_lcd_panel_io_handle_t touch_io_handle = NULL;
+    esp_lcd_panel_io_spi_config_t io_config = ESP_LCD_TOUCH_IO_SPI_XPT2046_CONFIG(TOUCH_CS);
+    io_config.pclk_hz = TOUCH_CLOCK_HZ;
+    
+    esp_err_t ret = esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)TOUCH_HOST, &io_config, &touch_io_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create touch panel IO: %s", esp_err_to_name(ret));
+        return NULL;
+    }
+
+    esp_lcd_touch_config_t tp_cfg = {
+        .x_max = LCD_V_RES,
+        .y_max = LCD_H_RES,
+        .rst_gpio_num = GPIO_NUM_NC,
+        .int_gpio_num = GPIO_NUM_NC,  // Can use TOUCH_IRQ if you want interrupt mode
+        .levels = {
+            .reset = 0,
+            .interrupt = 0,
+        },
+        .flags = {
+            .swap_xy = 1,
+            .mirror_x = 1,
+            .mirror_y = 1,
+        },
+    };
+
+    esp_lcd_touch_handle_t touch_handle = NULL;
+    ret = esp_lcd_touch_new_spi_xpt2046(touch_io_handle, &tp_cfg, &touch_handle);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize XPT2046: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Troubleshooting checklist:");
+        ESP_LOGE(TAG, "  1. Verify touch CS pin: GPIO %d", TOUCH_CS);
+        ESP_LOGE(TAG, "  2. Check SPI wiring (shared with LCD): MOSI=%d, MISO=12, CLK=%d", PIN_NUM_MOSI, PIN_NUM_CLK);
+        ESP_LOGE(TAG, "  3. Ensure XPT2046 has power (3.3V)");
+        return NULL;
+    }
+    
+    ESP_LOGI(TAG, "XPT2046 touch controller initialized successfully");
+    return touch_handle;
+}
+
 // Turn on the backlight
 static void enable_backlight(void)
 {
@@ -192,6 +276,35 @@ static void init_lvgl_display(esp_lcd_panel_handle_t panel_handle, lv_color_t *b
     lv_display_set_user_data(lvgl_disp, panel_handle);
 }
 
+// Initialize LVGL touch input device
+static void init_lvgl_touch_input(esp_lcd_touch_handle_t touch_handle)
+{
+    ESP_LOGI(TAG, "Creating LVGL touch input device");
+    
+    lvgl_touch_indev = lv_indev_create();
+    lv_indev_set_type(lvgl_touch_indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(lvgl_touch_indev, lvgl_touch_read_cb);
+    lv_indev_set_user_data(lvgl_touch_indev, touch_handle);
+}
+
+// Button event handler
+static void button_event_handler(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    
+    if (code == LV_EVENT_CLICKED) {
+        // ESP_LOGI(TAG, "Button clicked!");
+        
+        // Change button label on click
+        lv_obj_t *btn = lv_event_get_target(e);
+        lv_obj_t *label = lv_obj_get_child(btn, 0);
+        lv_label_set_text(label, "Clicked!");
+        
+        // Change button color
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x00AA00), LV_PART_MAIN);
+    }
+}
+
 // Create background style
 static void create_background(void)
 {
@@ -210,12 +323,13 @@ static void create_hello_label(void)
     lv_obj_center(label);
 }
 
-// Create button with label
+// Create button with label and event handler
 static void create_button(void)
 {
     lv_obj_t *btn = lv_button_create(lv_screen_active());
     lv_obj_set_size(btn, 120, 50);
     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 70);
+    lv_obj_add_event_cb(btn, button_event_handler, LV_EVENT_CLICKED, NULL);
     
     lv_obj_t *btn_label = lv_label_create(btn);
     lv_label_set_text(btn_label, "Click Me!");
@@ -228,7 +342,7 @@ static void create_ui(void)
     ESP_LOGI(TAG, "Creating UI");
     create_background();
     create_hello_label();
-    // create_button();
+    create_button();
 }
 
 // Main LVGL task loop
@@ -243,7 +357,7 @@ static void lvgl_task_loop(void)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting ESP32-3248S035 LVGL Demo");
+    ESP_LOGI(TAG, "Starting ESP32-3248S035R LVGL Demo with XPT2046 Resistive Touch");
     ESP_LOGI(TAG, "LVGL version: %d.%d.%d", lv_version_major(), lv_version_minor(), lv_version_patch());
 
     // Initialize hardware components
@@ -254,6 +368,15 @@ void app_main(void)
     esp_lcd_panel_handle_t panel_handle = init_lcd_panel(io_handle);
     
     configure_lcd_panel(panel_handle);
+    
+    // Initialize touch controller (XPT2046 shares SPI with LCD)
+    esp_lcd_touch_handle_t touch_handle = init_touch_controller();
+    
+    if (touch_handle == NULL) {
+        ESP_LOGW(TAG, "Touch controller initialization failed - continuing without touch");
+        ESP_LOGW(TAG, "Display will work but touch will not be available");
+    }
+    
     enable_backlight();
 
     // Initialize LVGL
@@ -267,11 +390,16 @@ void app_main(void)
     allocate_lvgl_buffers(&buf1, &buf2);
     
     init_lvgl_display(panel_handle, buf1, buf2);
+    
+    // Only initialize touch input if touch controller was successfully initialized
+    if (touch_handle != NULL) {
+        init_lvgl_touch_input(touch_handle);
+    }
 
     // Create UI
     create_ui();
 
-    ESP_LOGI(TAG, "Display initialized successfully!");
+    ESP_LOGI(TAG, "Display and touch initialized successfully!");
 
     // Run main loop
     lvgl_task_loop();
