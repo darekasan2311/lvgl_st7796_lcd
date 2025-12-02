@@ -25,7 +25,6 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
-#include "../managed_components/lvgl__lvgl/src/libs/tiny_ttf/lv_tiny_ttf.h"
 
 #include "esp_lcd_st7796.h"
 
@@ -202,19 +201,20 @@ static void create_background(void)
 }
 
 // Create "Hello World" label with vector font
-static void create_hello_label(void)
-{
-    extern lv_font_t science_black_32;
 
+
+
+static void create_label(const lv_font_t *font, int x, int y, char *text)
+{
     lv_obj_t *label = lv_label_create(lv_screen_active());
     lv_label_set_text(label, "Hello World");
 
-    lv_obj_set_style_text_font(label, &science_black_32, 0);
+    lv_obj_set_style_text_font(label, font, 0);
 
     lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
     
-    lv_obj_center(label);
+    lv_obj_set_pos(label, x, y);
 }
 
 // Create button with label
@@ -233,8 +233,13 @@ static void create_hello_label(void)
 static void create_ui(void)
 {
     ESP_LOGI(TAG, "Creating UI");
+
+    extern lv_font_t jet_mono_light_32;
+    // extern lv_font_t science_black_32;
+
     create_background();
-    create_hello_label();
+    // create_label(&science_black_32);
+    create_label(&jet_mono_light_32);
     // create_button();
 }
 
