@@ -25,6 +25,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl.h"
+#include "../managed_components/lvgl__lvgl/src/libs/tiny_ttf/lv_tiny_ttf.h"
 
 #include "esp_lcd_st7796.h"
 
@@ -200,27 +201,33 @@ static void create_background(void)
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
 }
 
-// Create "Hello World" label
+// Create "Hello World" label with vector font
 static void create_hello_label(void)
 {
+    extern lv_font_t science_black_32;
+
     lv_obj_t *label = lv_label_create(lv_screen_active());
     lv_label_set_text(label, "Hello World");
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_48, 0);
+
+    lv_obj_set_style_text_font(label, &science_black_32, 0);
+
     lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
+    
     lv_obj_center(label);
 }
 
 // Create button with label
-static void create_button(void)
-{
-    lv_obj_t *btn = lv_button_create(lv_screen_active());
-    lv_obj_set_size(btn, 120, 50);
-    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 70);
-    
-    lv_obj_t *btn_label = lv_label_create(btn);
-    lv_label_set_text(btn_label, "Click Me!");
-    lv_obj_center(btn_label);
-}
+// static void create_button(void)
+// {
+//     lv_obj_t *btn = lv_button_create(lv_screen_active());
+//     lv_obj_set_size(btn, 120, 50);
+//     lv_obj_align(btn, LV_ALIGN_CENTER, 0, 70);
+//
+//     lv_obj_t *btn_label = lv_label_create(btn);
+//     lv_label_set_text(btn_label, "Click Me!");
+//     lv_obj_center(btn_label);
+// }
 
 // Create all UI elements
 static void create_ui(void)
